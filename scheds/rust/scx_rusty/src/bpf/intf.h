@@ -100,6 +100,8 @@ struct task_ctx {
 	u32 dom_id;
 	u32 weight;
 	bool runnable;
+	bool runnable_called;
+	u32 last_cb_called;
 	u64 dom_active_pids_gen;
 	u64 deadline;
 

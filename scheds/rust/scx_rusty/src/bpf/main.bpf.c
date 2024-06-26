@@ -273,7 +273,8 @@ static u64 scale_inverse_fair(u64 value, u64 weight)
 	return value * 100 / weight;
 }
 
-static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
+static void dom_dcycle_adj(struct task_struct *p, u32 dom_id, u32 weight,
+			   u64 now, bool runnable)
 {
 	struct dom_ctx *domc;
 	struct bucket_ctx *bucket;
@@ -296,14 +297,13 @@ static void dom_dcycle_adj(u32 dom_id, u32 weight, u64 now, bool runnable)
 	bpf_spin_unlock(&lockw->lock);
 
 	if (adj < 0 && (s64)bucket->dcycle < 0)
-		scx_bpf_error("cpu%d dom%u bucket%u load underflow (dcycle=%lld adj=%lld)",
-			      bpf_get_smp_processor_id(), dom_id, bucket_idx,
+		scx_bpf_error("%s[%d] cpu%d dom%u bucket%u load underflow (dcycle=%lld adj=%lld)",
+			      p->comm, p->pid, bpf_get_smp_processor_id(), dom_id, bucket_idx,
 			      bucket->dcycle, adj);
 
-	if (debug >=2 &&
-	    (!domc->dbg_dcycle_printed_at || now - domc->dbg_dcycle_printed_at >= 1000000000)) {
-		bpf_printk("DCYCLE ADJ dom=%u bucket=%u adj=%lld dcycle=%u avg_dcycle=%llu",
-			   dom_id, bucket_idx, adj, bucket->dcycle,
+	if (debug >=2) {
+		bpf_printk("DCYCLE ADJ %s[%d] dom=%u bucket=%u adj=%lld dcycle=%u avg_dcycle=%llu",
+			   p->comm, p->pid, dom_id, bucket_idx, adj, bucket->dcycle,
 			   ravg_read(&bucket->rd, now, load_half_life) >> RAVG_FRAC_BITS);
 		domc->dbg_dcycle_printed_at = now;
 	}
@@ -1282,10 +1282,17 @@ void BPF_STRUCT_OPS(rusty_runnable, struct task_struct *p, u64 enq_flags)
 	if (!(wakee_ctx = lookup_task_ctx(p)))
 		return;
 
+	if (wakee_ctx->runnable)
+		scx_bpf_error("%s[%d] was already runnable", p->comm, p->pid);
+	wakee_ctx->runnable = true;
+	wakee_ctx->runnable_called = true;
+	if (wakee_ctx->last_cb_called != 0 && wakee_ctx->last_cb_called != 4)
+		scx_bpf_error("%s[%d] unexpected runnable last cb %u", p->comm, p->pid, wakee_ctx->last_cb_called);
+	wakee_ctx->last_cb_called = 1;
 	wakee_ctx->is_kworker = p->flags & PF_WQ_WORKER;
 
 	task_load_adj(p, wakee_ctx, now, true);
-	dom_dcycle_adj(wakee_ctx->dom_id, wakee_ctx->weight, now, true);
+	dom_dcycle_adj(p, wakee_ctx->dom_id, wakee_ctx->weight, now, true);
 
 	if (fifo_sched)
 		return;
@@ -1362,6 +1369,9 @@ void BPF_STRUCT_OPS(rusty_running, struct task_struct *p)
 
 	running_update_vtime(p, taskc, domc);
 	taskc->last_run_at = bpf_ktime_get_ns();
+	if (taskc->last_cb_called != 1 && taskc->last_cb_called != 3)
+		scx_bpf_error("%s[%d] unexpected running last cb %u", p->comm, p->pid, taskc->last_cb_called);
+	taskc->last_cb_called = 2;
 }
 
 static void stopping_update_vtime(struct task_struct *p,
@@ -1399,6 +1409,9 @@ void BPF_STRUCT_OPS(rusty_stopping, struct task_struct *p, bool runnable)
 		return;
 
 	stopping_update_vtime(p, taskc, domc);
+	if (taskc->last_cb_called != 2)
+		scx_bpf_error("%s[%d] unexpected stopping last cb %u", p->comm, p->pid, taskc->last_cb_called);
+	taskc->last_cb_called = 3;
 }
 
 void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
@@ -1410,8 +1423,15 @@ void BPF_STRUCT_OPS(rusty_quiescent, struct task_struct *p, u64 deq_flags)
 	if (!(taskc = lookup_task_ctx(p)))
 		return;
 
+	if (!taskc->runnable)
+		scx_bpf_error("%s[%d] Quiescent called twice (%u, %d)", p->comm, p->pid, taskc->last_cb_called, taskc->runnable_called);
+
+	if (taskc->last_cb_called != 3 && taskc->last_cb_called != 1)
+		scx_bpf_error("%s[%d] unexpected quiescent last cb %u", p->comm, p->pid, taskc->last_cb_called);
+	taskc->runnable = false;
+	taskc->last_cb_called = 4;
 	task_load_adj(p, taskc, now, false);
-	dom_dcycle_adj(taskc->dom_id, taskc->weight, now, false);
+	dom_dcycle_adj(p, taskc->dom_id, taskc->weight, now, false);
 
 	if (fifo_sched)
 		return;
