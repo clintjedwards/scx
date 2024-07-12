@@ -134,6 +134,7 @@ struct task_ctx {
 	 * Voluntary context switches metrics.
 	 */
 	u64 nvcsw;
+	u64 prev_nvcsw;
 	u64 nvcsw_ts;
 	u64 avg_nvcsw;
 };
@@ -178,15 +179,6 @@ struct task_ctx *lookup_task_ctx(const struct task_struct *p)
 static inline bool is_kthread(const struct task_struct *p)
 {
 	return !!(p->flags & PF_KTHREAD);
-}
-
-/*
- * Return true if the system is capable of accepting more interactive tasks,
- * false otherwise.
- */
-static bool is_interactive_avail(void)
-{
-	return scx_bpf_dsq_nr_queued(PRIO_DSQ) < nr_online_cpus * 4;
 }
 
 /*
@@ -451,17 +443,19 @@ out_put_cpumask:
  */
 static void handle_sync_wakeup(struct task_struct *p)
 {
-	struct task_ctx *tctx;
+	struct task_struct *current = (void *)bpf_get_current_task_btf();
+	struct task_ctx *tctx, *curr_tctx;
 
 	/*
-	 * If we are waking up a task set the task as interactive, so that it
-	 * can be dispatched as soon as possible on the first CPU available.
+	 * Awakened task inherits the interactiveness of the waker task.
 	 */
+	curr_tctx = try_lookup_task_ctx(current);
+	if (!curr_tctx)
+		return;
 	tctx = lookup_task_ctx(p);
 	if (!tctx)
 		return;
-	if (is_interactive_avail())
-		tctx->is_interactive = true;
+	tctx->is_interactive = curr_tctx->is_interactive;
 }
 
 s32 BPF_STRUCT_OPS(bpfland_select_cpu, struct task_struct *p, s32 prev_cpu, u64 wake_flags)
@@ -518,7 +512,7 @@ void BPF_STRUCT_OPS(bpfland_enqueue, struct task_struct *p, u64 enq_flags)
 	 * that can consume them) we can just dispatch them to the shared DSQ
 	 * and simply rely on the vruntime logic.
 	 */
-	if (tctx->is_interactive && is_interactive_avail()) {
+	if (tctx->is_interactive) {
 		scx_bpf_dispatch_vtime(p, PRIO_DSQ, slice, vtime, enq_flags);
 		__sync_fetch_and_add(&nr_prio_dispatches, 1);
 	} else {
@@ -717,6 +711,13 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		p->scx.dsq_vtime += (slice_ns - p->scx.slice) * 100 / p->scx.weight;
 
 	/*
+	 * Increase the count of voluntary context switches if the task
+	 * releases the CPU without using its entire allocated time slice.
+	 */
+	if (p->scx.slice > 0)
+		tctx->nvcsw++;
+
+	/*
 	 * Refresh voluntary context switch metrics.
 	 *
 	 * Evaluate the average number of voluntary context switches per second
@@ -724,20 +725,16 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 	 */
 	delta_t = (s64)(now - tctx->nvcsw_ts);
 	if (nvcsw_thresh && delta_t > NSEC_PER_SEC) {
-		u64 delta_nvcsw = p->nvcsw - tctx->nvcsw;
+		u64 delta_nvcsw = tctx->nvcsw - tctx->prev_nvcsw;
 		u64 avg_nvcsw = delta_nvcsw * NSEC_PER_SEC / delta_t;
 
 		tctx->avg_nvcsw = calc_avg(tctx->avg_nvcsw, avg_nvcsw);
-		tctx->nvcsw = p->nvcsw;
+		tctx->prev_nvcsw = p->nvcsw;
 		tctx->nvcsw_ts = now;
 
-		dbg_msg("%s: pid=%d (%s) delta_nvcsw=%llu delta_t=%llu "
-			"curr_avg_nvcsw=%llu avg_nvcsw=%llu",
-			__func__, p->pid, p->comm, delta_nvcsw, delta_t,
-			avg_nvcsw, tctx->avg_nvcsw);
 		/*
-		 * Classify interactive tasks based on the average amount of their
-		 * voluntary context switches.
+		 * Classify interactive tasks based on the average amount of
+		 * their voluntary context switches.
 		 *
 		 * A task can be promoted to interactive if the average of
 		 * voluntary context switches per second exceeds nvcsw_thresh.
@@ -747,7 +744,7 @@ void BPF_STRUCT_OPS(bpfland_stopping, struct task_struct *p, bool runnable)
 		 */
 		if (tctx->avg_nvcsw >= nvcsw_thresh)
 			tctx->is_interactive = true;
-		else if (tctx->avg_nvcsw == 0)
+		else
 			tctx->is_interactive = false;
 	}
 }
