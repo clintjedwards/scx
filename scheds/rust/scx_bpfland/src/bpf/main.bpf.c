@@ -262,19 +262,50 @@ static inline u64 task_vtime(struct task_struct *p)
 	 * Limit the vruntime to (vtime_now - slice_ns_lag) to avoid penalizing
 	 * tasks too much (this helps to speed up new fork'ed tasks).
 	 */
-	if (vtime_before(vtime, vtime_now - slice_ns_lag))
+	if (vtime_before(vtime, vtime_now - slice_ns_lag)) {
 		vtime = vtime_now - slice_ns_lag;
+		/*
+		 * Make sure to update the minimum task vruntime, even if don't
+		 * dispatch the task.
+		 */
+		p->scx.dsq_vtime = vtime;
+	}
 
 	return vtime;
 }
 
 /*
+ * Return true if all the CPUs in the system are idle, false otherwise.
+ */
+static bool is_system_busy(void)
+{
+	const struct cpumask *idle_cpumask;
+	bool is_busy;
+
+	idle_cpumask = scx_bpf_get_idle_cpumask();
+	is_busy = bpf_cpumask_empty(idle_cpumask);
+	scx_bpf_put_cpumask(idle_cpumask);
+
+	return is_busy;
+}
+
+/*
  * Return the task's unused portion of its previously assigned time slice in
- * the range a [slice_ns_min..slice_ns].
+ * the range a [slice_ns_min .. slice_ns].
  */
 static inline u64 task_slice(struct task_struct *p)
 {
-	return CLAMP((p->scx.slice + slice_ns_min) / 2, slice_ns_min, slice_ns);
+	/*
+	 * Always return maximum time slice there are idle CPUs in the system.
+	 */
+	if (!is_system_busy())
+		return slice_ns;
+	/*
+	 * Double the amount of unused task slice: this allows to reward tasks
+	 * that use less CPU time and periodically refill the time slice every
+	 * time a task is dispatched.
+	 */
+	return CLAMP(p->scx.slice * 2, slice_ns_min, slice_ns);
 }
 
 /*
