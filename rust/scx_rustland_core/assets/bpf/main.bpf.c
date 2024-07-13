@@ -1023,6 +1023,7 @@ void BPF_STRUCT_OPS(rustland_exit, struct scx_exit_info *ei)
 	UEI_RECORD(uei, ei);
 }
 
+/*test*/
 /*
  * Scheduling class declaration.
  */
