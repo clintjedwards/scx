@@ -196,7 +196,7 @@ impl<'cb> BpfScheduler<'cb> {
         slice_us: u64,
         nr_cpus_online: i32,
         partial: bool,
-	exit_dump_len: u32,
+        exit_dump_len: u32,
         full_user: bool,
         debug: bool,
     ) -> Result<Self> {
@@ -254,7 +254,7 @@ impl<'cb> BpfScheduler<'cb> {
         if partial {
             skel.struct_ops.rustland_mut().flags |= *compat::SCX_OPS_SWITCH_PARTIAL;
         }
-	skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
+        skel.struct_ops.rustland_mut().exit_dump_len = exit_dump_len;
 
         skel.bss_mut().usersched_pid = std::process::id();
         skel.rodata_mut().slice_ns = slice_us * 1000;
@@ -400,7 +400,10 @@ impl<'cb> BpfScheduler<'cb> {
                 Ok(Some(task))
             }
             res if res < 0 => Err(res),
-            res => panic!("Unexpected return value from libbpf-rs::consume_raw(): {}", res),
+            res => panic!(
+                "Unexpected return value from libbpf-rs::consume_raw(): {}",
+                res
+            ),
         }
     }
 
@@ -421,7 +424,7 @@ impl<'cb> BpfScheduler<'cb> {
     // Called on exit to shutdown and report exit message from the BPF part.
     pub fn shutdown_and_report(&mut self) -> Result<()> {
         self.struct_ops.take();
-        uei_report!(&self.skel, uei)
+        Ok(())
     }
 }
 

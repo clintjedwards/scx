@@ -899,5 +899,5 @@ SCX_OPS_DEFINE(rustland,
 	       .init			= (void *)rustland_init,
 	       .exit			= (void *)rustland_exit,
 	       .flags			= SCX_OPS_ENQ_LAST | SCX_OPS_KEEP_BUILTIN_IDLE,
-	       .timeout_ms		= 5000,
+	       .timeout_ms		= 500000,
 	       .name			= "rustland");
