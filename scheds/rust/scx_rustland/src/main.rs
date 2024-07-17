@@ -174,6 +174,11 @@ struct TaskInfo {
     nvcsw_ts: u64,         // timestamp of the previous nvcsw update
 }
 
+struct Processes {
+    summer_1: u32,
+    summer_2: u32,
+}
+
 // Task information map: store total execution time and vruntime of each task in the system.
 //
 // TaskInfo objects are stored in the HashMap and they are indexed by pid.
@@ -265,6 +270,8 @@ struct Scheduler<'a> {
     init_page_faults: u64, // Initial page faults counter
     no_preemption: bool,   // Disable task preemption
     full_user: bool,       // Run all tasks through the user-space scheduler
+    summer_1: u32,         // pid
+    summer_2: u32,         // pid
 }
 
 impl<'a> Scheduler<'a> {
@@ -297,6 +304,9 @@ impl<'a> Scheduler<'a> {
         // Initialize initial page fault counter.
         let init_page_faults: u64 = 0;
 
+        let summer_1_pid = launch_process("thingdoer", "summer1");
+        let summer_2_pid = launch_process("thingdoer", "summer2");
+
         // Low-level BPF connector.
         let nr_cpus = topo_map.nr_cpus_possible();
         let bpf = BpfScheduler::init(
@@ -323,6 +333,8 @@ impl<'a> Scheduler<'a> {
             init_page_faults,
             no_preemption,
             full_user,
+            summer_1: summer_1_pid,
+            summer_2: summer_2_pid,
         })
     }
 
@@ -782,4 +794,22 @@ fn main() -> Result<()> {
 
     // Start the scheduler.
     sched.run(shutdown)
+}
+
+// Launches a process and returns the PID.
+fn launch_process(bin_name: &str, name: &str) -> u32 {
+    // Launch the process
+    let mut command = std::process::Command::new(bin_name);
+    command.arg(name);
+
+    let child = command
+        .stdout(std::process::Stdio::inherit())
+        .spawn()
+        .expect("Failed to start process");
+
+    // Get the PID of the launched process
+    let pid = child.id();
+    info!(pid = pid, bin_name = bin_name, "Launched process");
+
+    pid
 }
