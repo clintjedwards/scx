@@ -555,6 +555,30 @@ impl<'a> Scheduler<'a> {
                     // be scheduled.
                     dispatched_task.set_slice_ns(self.effective_slice_ns(nr_scheduled));
 
+                    let winner = match get_current_winner() {
+                        Ok(winner) => winner,
+                        Err(e) => {
+                            error!(err = %e, "There was no winner when we checked");
+                            std::thread::sleep(std::time::Duration::from_secs(1));
+                            return;
+                        }
+                    };
+
+                    match dispatched_task.pid {
+                        self.summer_1 => {
+                            if winner != Competitors::Summer1 {
+                                continue
+                            }
+                        },
+                        self.summer_2 => {
+                            if winner != Competitors::Summer2 {
+                                continue
+                            }
+                        }
+                        _ => {},
+                    };
+
+
                     // Send task to the BPF dispatcher.
                     match self.bpf.dispatch_task(&dispatched_task) {
                         Ok(_) => {}
@@ -809,7 +833,41 @@ fn launch_process(bin_name: &str, name: &str) -> u32 {
 
     // Get the PID of the launched process
     let pid = child.id();
-    info!(pid = pid, bin_name = bin_name, "Launched process");
+    info!("Launched process '{}'", pid);
 
     pid
+}
+
+#[derive(Debug, Deserialize)]
+struct CurrentWinnerResponse {
+    winner: String,
+}
+
+fn get_current_winner() -> Result<Competitors> {
+    let url = "http://localhost:8080/api/current_winner";
+
+    let winner = reqwest::blocking::Client::new()
+        .get(url)
+        .header("User-Agent", "scheduler")
+        .send()?;
+
+    let winner: CurrentWinnerResponse = winner.json()?;
+
+    Competitors::from_str(&winner.winner)
+}
+
+#[derive(Debug, Hash, Eq, PartialEq)]
+enum Competitors {
+    Summer1,
+    Summer2,
+}
+
+impl Competitors {
+    fn from_str(input: &str) -> Result<Competitors> {
+        match input.to_lowercase().as_str() {
+            "summer1" => Ok(Competitors::Summer1),
+            "summer2" => Ok(Competitors::Summer2),
+            _ => bail!("Unknown competitor"),
+        }
+    }
 }
